@@ -448,8 +448,27 @@ struct UsageView: View {
 
 // MARK: - Mascot
 
+/// Render an emoji into a tiny low-res bitmap so it can be scaled up with
+/// nearest-neighbor (no smoothing) for a chunky pixel-art look.
+func pixelEmojiImage(_ emoji: String, lowRes: Int = 20) -> NSImage {
+    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: lowRes, pixelsHigh: lowRes,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return NSImage() }
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    let L = CGFloat(lowRes)
+    let font = NSFont.systemFont(ofSize: L * 0.94)
+    let s = emoji as NSString
+    let sz = s.size(withAttributes: [.font: font])
+    s.draw(at: NSPoint(x: (L - sz.width) / 2, y: (L - sz.height) / 2), withAttributes: [.font: font])
+    NSGraphicsContext.restoreGraphicsState()
+    let img = NSImage(size: NSSize(width: L, height: L))
+    img.addRepresentation(rep)
+    return img
+}
+
 struct MascotView: View {
-    let emoji: String, label: String, width: CGFloat
+    let image: NSImage, label: String, width: CGFloat
     let onDone: () -> Void
     @State private var x: CGFloat = -160
     @State private var hop = false
@@ -457,8 +476,10 @@ struct MascotView: View {
         VStack {
             Spacer()
             HStack(spacing: 10) {
-                Text(emoji).font(.system(size: 58)).rotationEffect(.degrees(hop ? 10 : -6))
-                Text(label).font(.system(size: 14, weight: .bold)).foregroundStyle(.white)
+                Image(nsImage: image).interpolation(.none).resizable()
+                    .frame(width: 64, height: 64)
+                    .rotationEffect(.degrees(hop ? 10 : -6))
+                Text(label).font(.system(size: 14, weight: .bold, design: .monospaced)).foregroundStyle(.white)
                     .padding(.horizontal, 12).padding(.vertical, 6).background(.black.opacity(0.55), in: Capsule())
             }
             .offset(x: x, y: hop ? -16 : 0)
@@ -581,7 +602,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         panel.level = .statusBar; panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         panel.isFloatingPanel = true; panel.backgroundColor = .clear; panel.isOpaque = false
         panel.hasShadow = false; panel.ignoresMouseEvents = true; panel.hidesOnDeactivate = false
-        let host = NSHostingView(rootView: MascotView(emoji: tool == "claude" ? CLAUDE_MASCOT : CODEX_MASCOT,
+        let host = NSHostingView(rootView: MascotView(image: pixelEmojiImage(tool == "claude" ? CLAUDE_MASCOT : CODEX_MASCOT),
             label: "✓ \(title)", width: screen.frame.width) { [weak self] in
                 panel.orderOut(nil); self?.mascots.removeAll { $0 === panel }
             })
