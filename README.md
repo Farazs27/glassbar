@@ -1,50 +1,52 @@
 # GlassBar
 
-A tiny **Liquid Glass status HUD** that floats at the top‑center of your Mac and shows, at a glance, **what's running** across your AI / dev tools plus **what's playing** — without touching your Dock or menu bar.
+A tiny **Liquid Glass status HUD** that floats at the top‑center of your Mac and shows, in one glance, **what's running** across your AI / dev tools, **how much of your plan you've used**, and **what's playing** — without touching your Dock or menu bar.
 
 ![GlassBar](docs/screenshot.png)
 
-From left to right the bar shows:
+Left → right:
 
-- **App logos** — VS Code · Cursor · Claude desktop · ChatGPT. Full‑color when the app is running, dimmed when it isn't.
-- **`✦ CC`** — running **Claude Code** sessions + **today's spend** (e.g. `$23.78`).
-- **`</> cx`** — running **Codex** sessions + **weekly limit used** (e.g. `84%wk`).
-- **`♪`** — the current **now‑playing** track (system‑wide), or *Not playing*.
-- **⌄** — expands a detail popover with full usage for both tools.
+- **App logos** — VS Code · Cursor · Claude desktop · ChatGPT. Full‑color when running, dimmed when not. **Click one to focus it** (or launch it if it's closed).
+- **Claude Code** — the Claude logo + live **session count** + your real **5‑hour limit** used (e.g. `5h 15%`), colored green/orange/red.
+- **Codex** — the OpenAI logo + live session count + **weekly limit** used (e.g. `wk 84%`).
+- **♪** — the current **now‑playing** track (system‑wide), the app making sound, or *Not playing*.
+- **⌄** — opens the **Running & Usage** popover.
 
-The popover breaks down:
+### The popover
 
-| Claude Code | Codex |
-|---|---|
-| Today — cost + tokens | 5‑hour window — % used + reset |
-| This week — cost + tokens | Weekly window — % used + reset |
-| Active 5‑hour block — cost + reset | Session + today tokens |
+Click the chevron (or a tool) to expand full detail for each tool:
 
-## Why
+- **Real plan limits** — Session (5‑hour) and Weekly utilization with reset countdowns. Claude also breaks out Sonnet/Opus when present.
+- **Live sessions** — every running session with its **project folder** and **busy / waiting / idle** status. **Click a session to jump to the terminal/editor running it.**
 
-It's a single always‑on glance for people who run several coding agents and editors at once: which tools are live, how many sessions, and how close you are to your rate limits — so you're never surprised by a wall.
+Close it with the **×**, the chevron, or by **clicking anywhere outside**.
 
 ## How it works (data sources)
 
-Everything is read from **local data on your machine** — no accounts, no network calls of our own.
+Everything is read from **local data + your own account**, no third‑party services.
 
-- **App running state** → `NSWorkspace` (by bundle id). Instant, no permissions.
-- **CLI sessions** → `ps`, counting *session‑leader* processes named `claude` / `codex` (a process whose parent isn't itself the same tool), so worker subprocesses don't inflate the number.
-- **Claude usage** → [`ccusage`](https://github.com/ryoppippi/ccusage), which aggregates the token/cost data Claude Code writes to `~/.claude/projects/**/*.jsonl`.
-- **Codex usage & limits** → parsed from the newest rollout in `~/.codex/sessions/**` (`rate_limits` → 5‑hour `primary` + weekly `secondary`, and `total_token_usage`).
-- **Now playing** → [`media-control`](https://github.com/ungive/media-control), a MediaRemote bridge that works system‑wide (Spotify, Apple Music, browsers, …).
+| Signal | Source |
+|---|---|
+| App running state | `NSWorkspace` (bundle id) — instant, no permissions |
+| App logos | `NSWorkspace.icon(forFile:)` |
+| **Claude plan limits** | the **same** `GET https://api.anthropic.com/api/oauth/usage` call that Claude Code's `/usage` uses, authorized with your OAuth token from the **Keychain** (`Claude Code-credentials`) |
+| Claude live sessions | `~/.claude/sessions/*.json` (name, cwd, status), filtered to live pids |
+| Codex limits | newest `~/.codex/sessions/**` rollout → `rate_limits` (5‑hour `primary` + weekly `secondary`) |
+| Codex live sessions | running `codex` processes + working dir |
+| Now playing | [`media-control`](https://github.com/ungive/media-control) (system‑wide), then Spotify/Apple Music via AppleScript, then a CoreAudio "audio is playing" check |
 
-> **One honest gap:** Claude Code does **not** store its plan *weekly‑limit %* / reset locally — it fetches that live for `/usage`. So GlassBar shows Claude **usage totals + the active 5‑hour block**, and surfaces a note pointing you to `/usage` for the official weekly number. Codex *does* expose its limits locally, so those are shown in full.
+Limits refresh every 30 s; running‑state and now‑playing every 3 s.
 
-The usage numbers refresh every 60 s; running‑state and now‑playing every 3 s.
+> **Note on Claude limits:** the 5‑hour and weekly limits are **account‑wide** (shared by *all* your Claude sessions) — that's how the plan works, so the popover shows the account limit plus the per‑session list. The first time GlassBar reads your Keychain token, macOS will ask permission — click **Always Allow**. If the token has gone stale, run any Claude command to refresh it.
+
+> **Note on now playing:** a track only appears if it registers with macOS "Now Playing" (Control Center) — Spotify, Apple Music, YouTube, etc. do. A raw HTML5 audio player (e.g. some Shopify pages) may not expose metadata; in that case GlassBar falls back to showing *"Audio playing"* when sound is detected.
 
 ## Requirements
 
 - macOS **26 (Tahoe)** or later — uses the real SwiftUI Liquid Glass API.
 - Swift toolchain (Xcode **or** Command Line Tools: `xcode-select --install`).
-- [`ccusage`](https://github.com/ryoppippi/ccusage): `npm install -g ccusage`
 - [`media-control`](https://github.com/ungive/media-control): `brew install media-control`
-- `jq` (preinstalled on macOS).
+- `jq`, `curl`, `security` — preinstalled on macOS.
 
 ## Build & install
 
@@ -54,13 +56,14 @@ cd glassbar
 ./build.sh
 ```
 
-`build.sh` compiles a release binary, assembles `GlassBar.app`, installs it to `~/Applications`, registers a **login LaunchAgent** (so it auto‑starts), and launches it. Re‑run it any time to update.
+`build.sh` compiles a release binary, assembles `GlassBar.app`, installs it to `~/Applications`, registers a **login LaunchAgent** (auto‑start), and launches it. Re‑run any time to update.
 
 ## Usage
 
-- **Drag** the bar anywhere — it remembers nothing fancy, just move it where you like.
-- Click the **⌄** chevron for the detailed usage popover.
-- **Quit** from the popover's *Quit* button (it won't come back until next login).
+- **Drag** the bar anywhere you like.
+- **Click an app logo** to focus/launch it.
+- **Click the chevron** (or Claude Code / Codex) for the usage + sessions popover; **click a session** to jump to it.
+- **Quit** from the popover's *Quit* button.
 
 ## Uninstall
 
@@ -77,17 +80,18 @@ The watched GUI apps live in `GUI_APPS` near the top of `Sources/GlassBar/main.s
 ## Project layout
 
 ```
-Sources/GlassBar/main.swift   # model + Liquid Glass UI + floating panels
-Resources/glassbar-usage.sh   # emits Claude + Codex usage as JSON
+Sources/GlassBar/main.swift   # model + Liquid Glass UI + floating panels + actions
+Resources/glassbar-usage.sh   # emits Claude + Codex limits & live sessions as JSON
 packaging/Info.plist          # LSUIElement app metadata
 build.sh                      # build → bundle → install → autostart
 ```
 
 ## Notes & limitations
 
-- Session counts reflect **active CLI processes**, which for heavy/agentic setups can be higher than the number of terminal windows you have open.
-- Codex limits come from your **most recent** Codex session, so they update the next time you run Codex.
-- `media-control` relies on a private MediaRemote bridge; Apple has tightened this in past releases, so a future macOS update could affect now‑playing.
+- Session counts reflect **live processes/sessions**, which for heavy/agentic setups can be higher than the number of terminal windows you have open.
+- Clicking a session focuses the **owning app** (terminal/editor); macOS can't reliably switch to the exact tab.
+- Codex limits come from your **most recent** Codex session and update the next time you run Codex.
+- `media-control` relies on a private MediaRemote bridge that Apple has tightened before, so a future macOS update could affect now‑playing.
 
 ## License
 
