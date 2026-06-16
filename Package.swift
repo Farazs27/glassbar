@@ -9,5 +9,6 @@ let package = Package(
             name: "GlassBar",
             path: "Sources/GlassBar"
         )
-    ]
+    ],
+    swiftLanguageModes: [.v5]
 )

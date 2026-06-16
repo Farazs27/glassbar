@@ -1,51 +1,61 @@
 # GlassBar
 
-A tiny **Liquid Glass status HUD** that floats at the top‑center of your Mac and shows, in one glance, **what's running** across your AI / dev tools, **how much of your plan you've used**, and **what's playing** — without touching your Dock or menu bar.
+A tiny **Liquid Glass status HUD** that floats at the top‑center of your Mac and shows, in one glance, **what's running** across your AI / dev tools, **how much of your plan you've used**, and **what's playing** — without touching your Dock or menu bar. When a session finishes, a little **mascot crawls across your screen** and you get a notification.
 
-![GlassBar](docs/screenshot.png)
+![GlassBar bar](docs/screenshot.png)
+
+## The bar
 
 Left → right:
 
 - **App logos** — VS Code · Cursor · Claude desktop · ChatGPT. Full‑color when running, dimmed when not. **Click one to focus it** (or launch it if it's closed).
-- **Claude Code** — the Claude logo + live **session count** + your real **5‑hour limit** used (e.g. `5h 15%`), colored green/orange/red.
-- **Codex** — the OpenAI logo + live session count + **weekly limit** used (e.g. `wk 84%`).
-- **♪** — the current **now‑playing** track (system‑wide), the app making sound, or *Not playing*.
+- **Claude Code** — Claude logo + live **session count** + your real **5‑hour limit used** (e.g. `5h 28%`), colored green/orange/red. **Click to jump to the latest session.**
+- **Codex** — OpenAI logo + session count + **weekly limit used** (e.g. `wk 84%`). **Click to open the latest session.**
+- **♪** — system‑wide **now‑playing** track, the app making sound, or *Not playing*.
 - **⌄** — opens the **Running & Usage** popover.
 
-### The popover
+## The popover
 
-Click the chevron (or a tool) to expand full detail for each tool:
+![GlassBar popover](docs/popover.png)
 
-- **Real plan limits** — Session (5‑hour) and Weekly utilization with reset countdowns. Claude also breaks out Sonnet/Opus when present.
-- **Live sessions** — every running session with its **project folder** and **busy / waiting / idle** status. **Click a session to jump to the terminal/editor running it.**
+Click the chevron for the full breakdown:
+
+- **Real plan limits** — Session (5‑hour), Weekly, and Sonnet/Opus utilization with reset countdowns.
+- **Spend** — today and this‑week cost + tokens, plus extra‑credit balance.
+- **Live sessions** — every running session with its **project folder**, **per‑session token usage**, and **busy / waiting / idle** status. **Click a session to jump to the terminal/editor running it.**
 
 Close it with the **×**, the chevron, or by **clicking anywhere outside**.
 
+## Session‑done mascots + notifications
+
+When a Claude Code session goes from *busy* back to idle (work finished), a 🦀 **crab crawls across the bottom of your screen** with the project name, and you get a macOS notification — **tap it to jump straight to that session**. Codex finishing gets a 🦊 (configurable at the top of `main.swift`).
+
 ## How it works (data sources)
 
-Everything is read from **local data + your own account**, no third‑party services.
+Everything is read from **local data + your own account** — no third‑party services.
 
 | Signal | Source |
 |---|---|
-| App running state | `NSWorkspace` (bundle id) — instant, no permissions |
-| App logos | `NSWorkspace.icon(forFile:)` |
-| **Claude plan limits** | the **same** `GET https://api.anthropic.com/api/oauth/usage` call that Claude Code's `/usage` uses, authorized with your OAuth token from the **Keychain** (`Claude Code-credentials`) |
-| Claude live sessions | `~/.claude/sessions/*.json` (name, cwd, status), filtered to live pids |
-| Codex limits | newest `~/.codex/sessions/**` rollout → `rate_limits` (5‑hour `primary` + weekly `secondary`) |
-| Codex live sessions | running `codex` processes + working dir |
-| Now playing | [`media-control`](https://github.com/ungive/media-control) (system‑wide), then Spotify/Apple Music via AppleScript, then a CoreAudio "audio is playing" check |
+| App running state / logos | `NSWorkspace` |
+| **Claude plan limits** | the **same** `GET https://api.anthropic.com/api/oauth/usage` call `/usage` uses, authorized with your OAuth token from the **Keychain** (`Claude Code-credentials`), cached 5 min |
+| Claude sessions + status | `~/.claude/sessions/*.json` (name, cwd, busy/idle), filtered to live pids |
+| Claude per‑session tokens | summed from each session's `~/.claude/projects/**` transcript |
+| Claude spend | [`ccusage`](https://github.com/ryoppippi/ccusage) (today / this week) |
+| Codex limits + tokens | newest `~/.codex/sessions/**` rollout (`rate_limits`, `total_token_usage`) |
+| Now playing | [`media-control`](https://github.com/ungive/media-control) → app name → CoreAudio "audio playing" |
 
-Limits refresh every 30 s; running‑state and now‑playing every 3 s.
+The bar (running state, now‑playing, sessions) refreshes every 3 s; usage/limits every 60 s. The slow parts (`ccusage`, per‑session tokens) are computed in the background into caches so the helper script always returns in < 0.1 s.
 
-> **Note on Claude limits:** the 5‑hour and weekly limits are **account‑wide** (shared by *all* your Claude sessions) — that's how the plan works, so the popover shows the account limit plus the per‑session list. The first time GlassBar reads your Keychain token, macOS will ask permission — click **Always Allow**. If the token has gone stale, run any Claude command to refresh it.
+> **Claude limits** are **account‑wide** — shared by *all* your Claude sessions (that's how the plan works), so the popover shows the account limit plus the per‑session list. The first time GlassBar reads your Keychain token, macOS asks permission — click **Always Allow**. The `/usage` endpoint is rate‑limited, so GlassBar caches it for 5 minutes and reuses the last good value if a refresh is throttled.
 
-> **Note on now playing:** a track only appears if it registers with macOS "Now Playing" (Control Center) — Spotify, Apple Music, YouTube, etc. do. A raw HTML5 audio player (e.g. some Shopify pages) may not expose metadata; in that case GlassBar falls back to showing *"Audio playing"* when sound is detected.
+> **Now playing** only shows a track if it registers with macOS "Now Playing" (Control Center) — Spotify, Apple Music, YouTube, etc. do. A raw HTML5 player (some Shopify pages) may not expose metadata; GlassBar then shows the app's name or *"Audio playing"* when it detects sound.
 
 ## Requirements
 
 - macOS **26 (Tahoe)** or later — uses the real SwiftUI Liquid Glass API.
 - Swift toolchain (Xcode **or** Command Line Tools: `xcode-select --install`).
 - [`media-control`](https://github.com/ungive/media-control): `brew install media-control`
+- [`ccusage`](https://github.com/ryoppippi/ccusage): `npm install -g ccusage`
 - `jq`, `curl`, `security` — preinstalled on macOS.
 
 ## Build & install
@@ -56,42 +66,28 @@ cd glassbar
 ./build.sh
 ```
 
-`build.sh` compiles a release binary, assembles `GlassBar.app`, installs it to `~/Applications`, registers a **login LaunchAgent** (auto‑start), and launches it. Re‑run any time to update.
-
-## Usage
-
-- **Drag** the bar anywhere you like.
-- **Click an app logo** to focus/launch it.
-- **Click the chevron** (or Claude Code / Codex) for the usage + sessions popover; **click a session** to jump to it.
-- **Quit** from the popover's *Quit* button.
+`build.sh` compiles a release binary, assembles `GlassBar.app`, installs it to `~/Applications`, registers a **login LaunchAgent** (auto‑start), clears any old instance, and launches it. Re‑run any time to update.
 
 ## Uninstall
 
 ```bash
 launchctl bootout "gui/$(id -u)/com.faraz.glassbar"
 rm -f ~/Library/LaunchAgents/com.faraz.glassbar.plist
-rm -rf ~/Applications/GlassBar.app
+rm -rf ~/Applications/GlassBar.app ~/.cache/glassbar
 ```
 
 ## Customize
 
-The watched GUI apps live in `GUI_APPS` near the top of `Sources/GlassBar/main.swift` — add/remove `AppDef(id:name:tint:)` entries (find a bundle id with `osascript -e 'id of app "Name"'`). Rebuild with `./build.sh`.
+- Watched GUI apps: `GUI_APPS` near the top of `Sources/GlassBar/main.swift` (find a bundle id with `osascript -e 'id of app "Name"'`).
+- Mascots: `CLAUDE_MASCOT` / `CODEX_MASCOT` constants.
 
-## Project layout
-
-```
-Sources/GlassBar/main.swift   # model + Liquid Glass UI + floating panels + actions
-Resources/glassbar-usage.sh   # emits Claude + Codex limits & live sessions as JSON
-packaging/Info.plist          # LSUIElement app metadata
-build.sh                      # build → bundle → install → autostart
-```
+Rebuild with `./build.sh`.
 
 ## Notes & limitations
 
-- Session counts reflect **live processes/sessions**, which for heavy/agentic setups can be higher than the number of terminal windows you have open.
+- Session counts reflect **live processes/sessions**, which for agentic setups can exceed your visible terminal windows.
 - Clicking a session focuses the **owning app** (terminal/editor); macOS can't reliably switch to the exact tab.
-- Codex limits come from your **most recent** Codex session and update the next time you run Codex.
-- `media-control` relies on a private MediaRemote bridge that Apple has tightened before, so a future macOS update could affect now‑playing.
+- `media-control` relies on a private MediaRemote bridge Apple has tightened before, so a future macOS update could affect now‑playing.
 
 ## License
 

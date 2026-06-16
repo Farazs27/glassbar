@@ -43,6 +43,7 @@ cat > "$LA" <<PLIST
 PLIST
 
 launchctl bootout "gui/$(id -u)/$BUNDLE_ID" 2>/dev/null || true
+pkill -f "$APPNAME.app/Contents/MacOS/$APPNAME" 2>/dev/null || true   # clear any orphan instances
 launchctl bootstrap "gui/$(id -u)" "$LA" 2>/dev/null || true
 
 echo "▶ Launching…"
