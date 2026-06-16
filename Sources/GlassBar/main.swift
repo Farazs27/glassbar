@@ -467,6 +467,25 @@ func pixelEmojiImage(_ emoji: String, lowRes: Int = 20) -> NSImage {
     return img
 }
 
+/// Downsample any image to a small bitmap so it reads as pixel-art when scaled
+/// back up with nearest-neighbor. Used to turn the Claude / Codex app logos into
+/// chunky pixel mascots.
+func pixelImage(_ src: NSImage, lowRes: Int = 26) -> NSImage {
+    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: lowRes, pixelsHigh: lowRes,
+        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return src }
+    NSGraphicsContext.saveGraphicsState()
+    let ctx = NSGraphicsContext(bitmapImageRep: rep)
+    ctx?.imageInterpolation = .medium
+    NSGraphicsContext.current = ctx
+    src.draw(in: NSRect(x: 0, y: 0, width: lowRes, height: lowRes),
+             from: .zero, operation: .copy, fraction: 1.0)
+    NSGraphicsContext.restoreGraphicsState()
+    let img = NSImage(size: NSSize(width: CGFloat(lowRes), height: CGFloat(lowRes)))
+    img.addRepresentation(rep)
+    return img
+}
+
 struct MascotView: View {
     let image: NSImage, label: String, width: CGFloat
     let onDone: () -> Void
@@ -602,7 +621,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         panel.level = .statusBar; panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         panel.isFloatingPanel = true; panel.backgroundColor = .clear; panel.isOpaque = false
         panel.hasShadow = false; panel.ignoresMouseEvents = true; panel.hidesOnDeactivate = false
-        let host = NSHostingView(rootView: MascotView(image: pixelEmojiImage(tool == "claude" ? CLAUDE_MASCOT : CODEX_MASCOT),
+        let iconKey = tool == "claude" ? CLAUDE_ICON : CODEX_ICON
+        let mascot = model.icons[iconKey].map { pixelImage($0, lowRes: 26) }
+            ?? pixelEmojiImage(tool == "claude" ? CLAUDE_MASCOT : CODEX_MASCOT)
+        let host = NSHostingView(rootView: MascotView(image: mascot,
             label: "✓ \(title)", width: screen.frame.width) { [weak self] in
                 panel.orderOut(nil); self?.mascots.removeAll { $0 === panel }
             })
