@@ -446,69 +446,76 @@ struct UsageView: View {
     }
 }
 
-// MARK: - Mascot
+// MARK: - Mascot (hand-drawn pixel-art crab that scuttles across the screen)
 
-/// Render an emoji into a tiny low-res bitmap so it can be scaled up with
-/// nearest-neighbor (no smoothing) for a chunky pixel-art look.
-func pixelEmojiImage(_ emoji: String, lowRes: Int = 20) -> NSImage {
-    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: lowRes, pixelsHigh: lowRes,
+/// Build a crisp pixel sprite from a grid of characters + a color map.
+func spriteImage(_ rows: [String], _ colors: [Character: NSColor]) -> NSImage {
+    let h = rows.count, w = rows.map { $0.count }.max() ?? 1
+    guard h > 0, w > 0, let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: w, pixelsHigh: h,
         bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return NSImage() }
     NSGraphicsContext.saveGraphicsState()
-    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
-    let L = CGFloat(lowRes)
-    let font = NSFont.systemFont(ofSize: L * 0.94)
-    let s = emoji as NSString
-    let sz = s.size(withAttributes: [.font: font])
-    s.draw(at: NSPoint(x: (L - sz.width) / 2, y: (L - sz.height) / 2), withAttributes: [.font: font])
+    let ctx = NSGraphicsContext(bitmapImageRep: rep); ctx?.shouldAntialias = false
+    NSGraphicsContext.current = ctx
+    for (ri, row) in rows.enumerated() {
+        for (ci, ch) in row.enumerated() where colors[ch] != nil {
+            colors[ch]!.setFill()
+            NSRect(x: ci, y: h - 1 - ri, width: 1, height: 1).fill()   // bitmap origin = bottom-left
+        }
+    }
     NSGraphicsContext.restoreGraphicsState()
-    let img = NSImage(size: NSSize(width: L, height: L))
-    img.addRepresentation(rep)
+    let img = NSImage(size: NSSize(width: w, height: h)); img.addRepresentation(rep)
     return img
 }
 
-/// Downsample any image to a small bitmap so it reads as pixel-art when scaled
-/// back up with nearest-neighbor. Used to turn the Claude / Codex app logos into
-/// chunky pixel mascots.
-func pixelImage(_ src: NSImage, lowRes: Int = 26) -> NSImage {
-    guard let rep = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: lowRes, pixelsHigh: lowRes,
-        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-        colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) else { return src }
-    NSGraphicsContext.saveGraphicsState()
-    let ctx = NSGraphicsContext(bitmapImageRep: rep)
-    ctx?.imageInterpolation = .medium
-    NSGraphicsContext.current = ctx
-    src.draw(in: NSRect(x: 0, y: 0, width: lowRes, height: lowRes),
-             from: .zero, operation: .copy, fraction: 1.0)
-    NSGraphicsContext.restoreGraphicsState()
-    let img = NSImage(size: NSSize(width: CGFloat(lowRes), height: CGFloat(lowRes)))
-    img.addRepresentation(rep)
-    return img
-}
+// 13×10 crab. o=outline, R=shell, w=eye, k=pupil. The legs row is swapped each
+// frame so the crab appears to scuttle.
+let CRAB_BODY = [
+    "oo.........oo",
+    "oRo.......oRo",
+    ".oRo.....oRo.",
+    "..oRRoooRRo..",
+    ".oRRRRRRRRRo.",
+    "oRRwRRRRRwRRo",
+    "oRRkRRRRRkRRo",
+    "oRRRRRRRRRRRo",
+    ".ooRRRRRRRoo.",
+]
+let CRAB_LEGS = [".o.o.o.o.o.o.", "o.o.o.o.o.o.o"]
+func crabFrames(_ colors: [Character: NSColor]) -> [NSImage] { CRAB_LEGS.map { spriteImage(CRAB_BODY + [$0], colors) } }
+let CRAB_CLAUDE: [Character: NSColor] = [
+    "o": NSColor(red: 0.55, green: 0.16, blue: 0.11, alpha: 1),
+    "R": NSColor(red: 0.93, green: 0.36, blue: 0.26, alpha: 1), "w": .white, "k": .black]
+let CRAB_CODEX: [Character: NSColor] = [
+    "o": NSColor(red: 0.10, green: 0.34, blue: 0.20, alpha: 1),
+    "R": NSColor(red: 0.22, green: 0.72, blue: 0.42, alpha: 1), "w": .white, "k": .black]
 
 struct MascotView: View {
-    let image: NSImage, label: String, width: CGFloat
+    let frames: [NSImage], label: String, width: CGFloat
     let onDone: () -> Void
-    @State private var x: CGFloat = -160
+    @State private var x: CGFloat = -180
     @State private var hop = false
+    @State private var frame = 0
+    private let legs = Timer.publish(every: 0.15, on: .main, in: .common).autoconnect()
     var body: some View {
         VStack {
             Spacer()
             HStack(spacing: 10) {
-                Image(nsImage: image).interpolation(.none).resizable()
-                    .frame(width: 64, height: 64)
-                    .rotationEffect(.degrees(hop ? 10 : -6))
+                Image(nsImage: frames[min(frame, frames.count - 1)]).interpolation(.none).resizable()
+                    .frame(width: 78, height: 60)
+                    .rotationEffect(.degrees(hop ? 3 : -3))
                 Text(label).font(.system(size: 14, weight: .bold, design: .monospaced)).foregroundStyle(.white)
                     .padding(.horizontal, 12).padding(.vertical, 6).background(.black.opacity(0.55), in: Capsule())
             }
-            .offset(x: x, y: hop ? -16 : 0)
-            .padding(.bottom, 70)
+            .offset(x: x, y: hop ? -10 : 0)
+            .padding(.bottom, 64)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+        .onReceive(legs) { _ in frame = (frame + 1) % max(frames.count, 1) }
         .onAppear {
-            withAnimation(.easeInOut(duration: 0.3).repeatForever(autoreverses: true)) { hop = true }
-            withAnimation(.linear(duration: 6)) { x = width + 180 }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 6.1) { onDone() }
+            withAnimation(.easeInOut(duration: 0.18).repeatForever(autoreverses: true)) { hop = true }
+            withAnimation(.linear(duration: 6.5)) { x = width + 200 }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 6.6) { onDone() }
         }
     }
 }
@@ -621,10 +628,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         panel.level = .statusBar; panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         panel.isFloatingPanel = true; panel.backgroundColor = .clear; panel.isOpaque = false
         panel.hasShadow = false; panel.ignoresMouseEvents = true; panel.hidesOnDeactivate = false
-        let iconKey = tool == "claude" ? CLAUDE_ICON : CODEX_ICON
-        let mascot = model.icons[iconKey].map { pixelImage($0, lowRes: 26) }
-            ?? pixelEmojiImage(tool == "claude" ? CLAUDE_MASCOT : CODEX_MASCOT)
-        let host = NSHostingView(rootView: MascotView(image: mascot,
+        let frames = crabFrames(tool == "claude" ? CRAB_CLAUDE : CRAB_CODEX)
+        let host = NSHostingView(rootView: MascotView(frames: frames,
             label: "✓ \(title)", width: screen.frame.width) { [weak self] in
                 panel.orderOut(nil); self?.mascots.removeAll { $0 === panel }
             })

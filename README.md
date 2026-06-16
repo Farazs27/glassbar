@@ -28,7 +28,7 @@ Close it with the **×**, the chevron, or by **clicking anywhere outside**.
 
 ## Session‑done mascots + notifications
 
-When a Claude Code session goes from *busy* back to idle (work finished), a 🦀 **crab crawls across the bottom of your screen** with the project name, and you get a macOS notification — **tap it to jump straight to that session**. Codex finishing gets a 🦊 (configurable at the top of `main.swift`).
+When a Claude Code session goes from *busy* back to idle (work finished), a **hand-drawn pixel-art crab scuttles across the bottom of your screen** (legs animated) with the project name, and you get a macOS notification — **tap it to jump straight to that session**. Claude's crab is coral, Codex's is green. The sprite is defined as a pixel grid (`CRAB_BODY` / `CRAB_LEGS`) in `main.swift` — easy to redraw.
 
 ## How it works (data sources)
 
