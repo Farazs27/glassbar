@@ -229,11 +229,13 @@ final class StatusModel: ObservableObject {
 
     static func shell(_ launch: String, _ args: [String]) -> String {
         let p = Process(); p.executableURL = URL(fileURLWithPath: launch); p.arguments = args
-        let o = Pipe(); p.standardOutput = o; p.standardError = Pipe()
+        let o = Pipe(); p.standardOutput = o; p.standardError = FileHandle.nullDevice
         do { try p.run() } catch { return "" }
+        // Drain stdout BEFORE waitUntilExit — large output (e.g. media-control artwork,
+        // >64KB) would otherwise fill the pipe buffer and deadlock the child.
+        let data = o.fileHandleForReading.readDataToEndOfFile()
         p.waitUntilExit()
-        return String(data: o.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 }
 
