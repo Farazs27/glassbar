@@ -4,6 +4,7 @@ import Combine
 import CoreAudio
 import UserNotifications
 import Darwin
+import IOKit.pwr_mgt
 
 // MARK: - Config
 
@@ -20,8 +21,7 @@ let GUI_APPS: [AppDef] = [
 ]
 let CLAUDE_ICON = "com.anthropic.claudefordesktop"
 let CODEX_ICON  = "com.openai.chat"
-let CLAUDE_MASCOT = "🦀"     // crawls across the screen when a Claude session finishes
-let CODEX_MASCOT  = "🦊"     // appears when a Codex session finishes
+// Session-done mascots are the pixel crabs below — see CRAB_BODY / CRAB_CLAUDE / CRAB_CODEX.
 
 // MARK: - Models
 
@@ -80,10 +80,51 @@ func pctColor(_ p: Double) -> Color { p >= 85 ? .red : (p >= 60 ? .orange : .gre
 final class StatusModel: ObservableObject {
     @Published var running: [String: Bool] = [:]
     @Published var music = ""
+    @Published var musicPlaying = false
     @Published var claudeSessions: [Session] = []
     @Published var codexSessions: [Session] = []
     @Published var limits = Limits()
+    @Published var keepAwake = false
     private(set) var icons: [String: NSImage] = [:]
+
+    // MARK: keep-awake (lid can close)
+    // Two layers: (1) an in-process IOKit assertion (PreventSystemSleep, like `caffeinate -s`)
+    // keeps the Mac awake with the lid closed on AC — instant, no admin, auto-released on quit;
+    // (2) `pmset disablesleep` (admin) extends that to battery, which macOS otherwise forces.
+    private var sleepAssertionID: IOPMAssertionID = 0
+
+    func toggleKeepAwake() { setKeepAwake(!keepAwake, prompt: true) }
+
+    /// Re-applies persisted state on launch. Only re-creates the (free) IOKit assertion —
+    /// `pmset disablesleep` persists across restarts on its own, so no admin prompt here.
+    func restoreKeepAwake() {
+        if UserDefaults.standard.bool(forKey: "keepAwake") { setKeepAwake(true, prompt: false) }
+    }
+
+    private func setKeepAwake(_ on: Bool, prompt: Bool) {
+        keepAwake = on
+        UserDefaults.standard.set(on, forKey: "keepAwake")
+        on ? holdAssertion() : releaseAssertion()       // layer 1: AC, instant, no prompt
+        if prompt { setDisableSleep(on) }               // layer 2: battery, admin (explicit toggles only)
+    }
+
+    private func holdAssertion() {
+        guard sleepAssertionID == 0 else { return }     // idempotent — never leak a second assertion
+        IOPMAssertionCreateWithName(kIOPMAssertionTypePreventSystemSleep as CFString,
+            IOPMAssertionLevel(kIOPMAssertionLevelOn),
+            "GlassBar keeping sessions alive" as CFString, &sleepAssertionID)
+    }
+    private func releaseAssertion() {
+        guard sleepAssertionID != 0 else { return }
+        IOPMAssertionRelease(sleepAssertionID); sleepAssertionID = 0
+    }
+    private func setDisableSleep(_ disable: Bool) {
+        let val = disable ? "1" : "0"
+        DispatchQueue.global(qos: .userInitiated).async {
+            _ = Self.shell("/usr/bin/osascript", ["-e",
+                "do shell script \"/usr/bin/pmset -a disablesleep \(val)\" with administrator privileges"])
+        }
+    }
 
     var onSessionDone: ((_ tool: String, _ title: String, _ pid: Int) -> Void)?
 
@@ -93,11 +134,20 @@ final class StatusModel: ObservableObject {
     private var started = false
 
     private var fast: Timer?, slow: Timer?
+    // Serial queues so refreshes never overlap (no process-spawn storms); *Busy flags
+    // coalesce ticks while one is still running. Busy flags are touched on main only.
+    private let sessionsQueue = DispatchQueue(label: "com.faraz.glassbar.sessions", qos: .utility)
+    private let mediaQueue = DispatchQueue(label: "com.faraz.glassbar.media", qos: .utility)
+    private var sessionsBusy = false
+    private var mediaBusy = false
+    private var codexCwdCache: [Int: String] = [:]   // pid → cwd (immutable per process); sessionsQueue-only
     private let mediaControl = ["/opt/homebrew/bin/media-control", "/usr/local/bin/media-control"]
         .first { FileManager.default.isExecutableFile(atPath: $0) }
     private let usageScript: String = {
         if let u = Bundle.main.url(forResource: "glassbar-usage", withExtension: "sh") { return u.path }
-        return NSString(string: "~/Desktop/Code-Projects/GlassBar/Resources/glassbar-usage.sh").expandingTildeInPath
+        // Dev fallback (running from source, e.g. `swift run`): look relative to the
+        // current working directory rather than any hardcoded machine path.
+        return FileManager.default.currentDirectoryPath + "/Resources/glassbar-usage.sh"
     }()
 
     func start() {
@@ -114,36 +164,67 @@ final class StatusModel: ObservableObject {
     private func refreshUsage() {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let out = Self.shell("/bin/zsh", ["-c", "'\(self.usageScript)'"])
+            // Run the script directly (no shell-quoting headaches, handles paths with spaces).
+            let out = Self.shell("/bin/bash", [self.usageScript])
             guard let d = out.data(using: .utf8), let l = try? JSONDecoder().decode(Limits.self, from: d) else { return }
             DispatchQueue.main.async { self.limits = l }
         }
     }
 
-    private func refreshFast() {
+    private func refreshFast() {   // runs on the main thread (Timer)
+        // Running apps: cheap, update every tick on main.
         let ids = Set(NSWorkspace.shared.runningApplications.compactMap { $0.bundleIdentifier })
         var run: [String: Bool] = [:]; for a in GUI_APPS { run[a.id] = ids.contains(a.id) }
-        // Sessions: posted immediately (never blocked by now-playing).
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self else { return }
-            let cs = self.readClaudeSessions(), xs = self.readCodexSessions()
-            DispatchQueue.main.async {
-                self.detectDone(claude: cs, codex: xs)
-                self.running = run; self.claudeSessions = cs; self.codexSessions = xs
+        self.running = run
+
+        // Sessions: snapshot per-session tokens on main (avoids a race on `limits`), then read off-main.
+        if !sessionsBusy {
+            sessionsBusy = true
+            let tokens = limits.claude.sessionTokens
+            sessionsQueue.async { [weak self] in
+                guard let self else { return }
+                let cs = self.readClaudeSessions(tokens: tokens), xs = self.readCodexSessions()
+                DispatchQueue.main.async {
+                    self.detectDone(claude: cs, codex: xs)
+                    self.claudeSessions = cs; self.codexSessions = xs
+                    self.sessionsBusy = false
+                }
             }
         }
         // Now playing: independent task.
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self, let np = self.nowPlaying() as String? else { return }
-            DispatchQueue.main.async { self.music = np }
+        if !mediaBusy {
+            mediaBusy = true
+            mediaQueue.async { [weak self] in
+                guard let self else { return }
+                let np = self.nowPlaying()
+                DispatchQueue.main.async { self.music = np.text; self.musicPlaying = np.playing; self.mediaBusy = false }
+            }
         }
     }
 
+    // Playback control -----------------------------------------------------------
+    /// Send a transport command to `media-control` (no-op if it isn't installed),
+    /// then re-read shortly after so the bar reflects the new track / play state.
+    func mediaCommand(_ cmd: String) {
+        guard let mc = mediaControl else { return }
+        DispatchQueue.global(qos: .userInitiated).async { _ = Self.shell(mc, [cmd]) }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+            DispatchQueue.global(qos: .utility).async {
+                guard let self else { return }
+                let np = self.nowPlaying()
+                DispatchQueue.main.async { self.music = np.text; self.musicPlaying = np.playing }
+            }
+        }
+    }
+    func togglePlayPause() {
+        musicPlaying.toggle()           // optimistic; corrected by the re-read above
+        mediaCommand("toggle-play-pause")
+    }
+
     // Sessions -----------------------------------------------------------------
-    private func readClaudeSessions() -> [Session] {
+    private func readClaudeSessions(tokens tok: [String: Double]) -> [Session] {
         let dir = NSString(string: "~/.claude/sessions").expandingTildeInPath
         guard let files = try? FileManager.default.contentsOfDirectory(atPath: dir) else { return [] }
-        let tok = limits.claude.sessionTokens
         var out: [Session] = []
         for f in files where f.hasSuffix(".json") {
             guard let data = FileManager.default.contents(atPath: dir + "/" + f),
@@ -157,18 +238,34 @@ final class StatusModel: ObservableObject {
         return out.sorted { (($0.status == "busy" ? 0 : 1), -$0.tokens) < (($1.status == "busy" ? 0 : 1), -$1.tokens) }
     }
 
+    // sessionsQueue-only: touches codexCwdCache, so must not run concurrently with itself.
     private func readCodexSessions() -> [Session] {
         let pids = Self.shell("/usr/bin/pgrep", ["-x", "codex"]).split(separator: "\n").compactMap { Int($0) }
+        guard !pids.isEmpty else { codexCwdCache = [:]; return [] }
         let set = Set(pids)
+        // One batched `ps` for all ppids instead of one process per pid.
+        var ppid: [Int: Int] = [:]
+        for line in Self.shell("/bin/ps", ["-o", "pid=,ppid=", "-p", pids.map(String.init).joined(separator: ",")]).split(separator: "\n") {
+            let f = line.split(separator: " ", omittingEmptySubsequences: true)
+            if f.count >= 2, let p = Int(f[0]), let pp = Int(f[1]) { ppid[p] = pp }
+        }
         var out: [Session] = []
         for pid in pids {
-            let pp = Int(Self.shell("/bin/ps", ["-o", "ppid=", "-p", "\(pid)"]).trimmingCharacters(in: .whitespaces)) ?? -1
-            if set.contains(pp) { continue }   // worker, not a leader
-            let lsof = Self.shell("/usr/sbin/lsof", ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"])
-            let cwd = lsof.split(separator: "\n").first { $0.hasPrefix("n") }.map { String($0.dropFirst()) } ?? ""
+            if let pp = ppid[pid], set.contains(pp) { continue }   // worker, not a leader
+            // cwd never changes for a live process → resolve via lsof once, then cache.
+            let cwd: String
+            if let cached = codexCwdCache[pid] {
+                cwd = cached
+            } else {
+                let lsof = Self.shell("/usr/sbin/lsof", ["-a", "-p", "\(pid)", "-d", "cwd", "-Fn"])
+                cwd = lsof.split(separator: "\n").first { $0.hasPrefix("n") }.map { String($0.dropFirst()) } ?? ""
+                codexCwdCache[pid] = cwd
+            }
             out.append(Session(sessionId: "codex-\(pid)", name: (cwd as NSString).lastPathComponent,
                                cwd: cwd, pid: pid, status: "running", tokens: 0))
         }
+        // Drop cache entries for pids that are gone, so it can't grow unbounded.
+        codexCwdCache = codexCwdCache.filter { set.contains($0.key) }
         return out
     }
 
@@ -195,21 +292,22 @@ final class StatusModel: ObservableObject {
     }
 
     // Now playing --------------------------------------------------------------
-    private func nowPlaying() -> String {
+    private func nowPlaying() -> (text: String, playing: Bool) {
         if let mc = mediaControl {
             let out = Self.shell(mc, ["get"])
             if let d = out.data(using: .utf8), let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] {
+                let playing = (o["playing"] as? Bool) ?? (o["isPlaying"] as? Bool) ?? false
                 let title = o["title"] as? String ?? "", artist = o["artist"] as? String ?? ""
                 let bundle = (o["bundleIdentifier"] as? String) ?? (o["parentApplicationBundleIdentifier"] as? String) ?? ""
                 if !title.isEmpty {
                     var s = artist.isEmpty ? title : "\(artist) — \(title)"
                     if s.count > 40 { s = String(s.prefix(39)) + "…" }
-                    return s
+                    return (s, playing)
                 }
-                if !bundle.isEmpty { return Self.appName(for: bundle) }   // app making sound, no metadata
+                if !bundle.isEmpty { return (Self.appName(for: bundle), playing) }   // app making sound, no metadata
             }
         }
-        return Self.systemAudioActive() ? "Audio playing" : ""
+        return Self.systemAudioActive() ? ("Audio playing", true) : ("", false)
     }
     static func appName(for b: String) -> String {
         if let u = NSWorkspace.shared.urlForApplication(withBundleIdentifier: b) { return u.deletingPathExtension().lastPathComponent }
@@ -246,6 +344,7 @@ struct Actions {
     var openTool: (String) -> Void
     var focusSession: (Int) -> Void
     var toggleUsage: () -> Void
+    var toggleKeepAwake: () -> Void
     var close: () -> Void
     var quit: () -> Void
 }
@@ -266,6 +365,18 @@ struct LogoView: View {
     }
 }
 struct Sep: View { var body: some View { Rectangle().fill(.secondary.opacity(0.22)).frame(width: 1, height: 16) } }
+
+/// A small transport button (play / pause / next / previous) for the now-playing strip.
+struct MediaButton: View {
+    let system: String, help: String
+    let action: () -> Void
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: system).font(.system(size: 11, weight: .semibold)).foregroundStyle(.primary)
+                .frame(width: 16, height: 16).contentShape(Rectangle())
+        }.buttonStyle(.plain).help(help)
+    }
+}
 
 // MARK: - Bar
 
@@ -309,11 +420,30 @@ struct BarView: View {
                     tint: .green) { actions.openTool("codex") }
             Sep()
             HStack(spacing: 6) {
-                Image(systemName: model.music.isEmpty ? "music.note" : "waveform").font(.system(size: 11, weight: .semibold))
+                Image(systemName: model.music.isEmpty ? "music.note" : (model.musicPlaying ? "waveform" : "pause.circle"))
+                    .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(model.music.isEmpty ? Color.secondary : Color.pink)
                 Text(model.music.isEmpty ? "Not playing" : model.music).font(.system(size: 11, weight: .medium)).lineLimit(1)
                     .foregroundStyle(model.music.isEmpty ? Color.secondary : Color.primary)
-            }.frame(width: 170, alignment: .leading)
+            }.frame(width: 150, alignment: .leading)
+            // Transport controls — disabled (dimmed) when nothing is playing so the bar width stays stable.
+            HStack(spacing: 8) {
+                MediaButton(system: "backward.fill", help: "Previous track") { model.mediaCommand("previous-track") }
+                MediaButton(system: model.musicPlaying ? "pause.fill" : "play.fill",
+                            help: model.musicPlaying ? "Pause" : "Play") { model.togglePlayPause() }
+                MediaButton(system: "forward.fill", help: "Next track") { model.mediaCommand("next-track") }
+            }
+            .foregroundStyle(model.music.isEmpty ? Color.secondary : Color.primary)
+            .disabled(model.music.isEmpty).opacity(model.music.isEmpty ? 0.35 : 1)
+            Sep()
+            Button(action: actions.toggleKeepAwake) {
+                Image(systemName: model.keepAwake ? "cup.and.saucer.fill" : "cup.and.saucer")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(model.keepAwake ? Color.orange : Color.secondary)
+            }.buttonStyle(.plain)
+            .help(model.keepAwake
+                ? "Keeping awake — sessions survive a closed lid (AC + battery). Click to restore sleep."
+                : "Keep awake when the lid is closed")
             Button(action: actions.toggleUsage) {
                 Image(systemName: "chevron.down.circle.fill").font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
             }.buttonStyle(.plain).help("Usage & sessions")
@@ -529,6 +659,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
     var clickMonitor: Any?
     var mascots: [NSPanel] = []
     var cancellables = Set<AnyCancellable>()
+    private var userMovedBar = false        // user has dragged the bar → stop auto-centering
+    private var programmaticMove = false     // guards our own setFrameOrigin from the move observer
 
     func applicationDidFinishLaunching(_ n: Notification) {
         let actions = Actions(
@@ -536,20 +668,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
             openTool: { [weak self] in self?.openTool($0) },
             focusSession: { [weak self] in self?.focusSession(pid: $0) },
             toggleUsage: { [weak self] in self?.toggleUsage() },
+            toggleKeepAwake: { [weak self] in self?.model.toggleKeepAwake() },
             close: { [weak self] in self?.hideUsage() },
             quit: { NSApp.terminate(nil) })
 
         barHost = NSHostingView(rootView: BarView(model: model, actions: actions)); barHost.sizingOptions = [.intrinsicContentSize]
         barPanel = makePanel(movable: true); barPanel.contentView = barHost
 
+        // Restore a user-chosen position (if any) so the bar stays where it was last dragged.
+        if let sx = UserDefaults.standard.object(forKey: "barOriginX") as? Double,
+           let sy = UserDefaults.standard.object(forKey: "barOriginY") as? Double {
+            userMovedBar = true
+            barPanel.setFrameOrigin(NSPoint(x: sx, y: sy))
+        }
+
         usageHost = NSHostingView(rootView: UsageView(model: model, actions: actions)); usageHost.sizingOptions = [.intrinsicContentSize]
         usagePanel = makePanel(movable: false); usagePanel.contentView = usageHost; usagePanel.orderOut(nil)
 
         model.onSessionDone = { [weak self] tool, title, pid in self?.sessionDone(tool: tool, title: title, pid: pid) }
         model.start()
+        model.restoreKeepAwake()
         relayout(); barPanel.orderFrontRegardless()
         model.objectWillChange.sink { [weak self] _ in DispatchQueue.main.async { self?.relayout() } }.store(in: &cancellables)
         NotificationCenter.default.addObserver(forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main) { [weak self] _ in self?.relayout() }
+        // Persist the bar's position whenever the user drags it (ignoring our own moves).
+        NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification, object: barPanel, queue: .main) { [weak self] _ in
+            guard let self, !self.programmaticMove else { return }
+            self.userMovedBar = true
+            let o = self.barPanel.frame.origin
+            UserDefaults.standard.set(Double(o.x), forKey: "barOriginX")
+            UserDefaults.standard.set(Double(o.y), forKey: "barOriginY")
+            self.positionUsage()   // keep the popover anchored to the bar while dragging
+        }
 
         let center = UNUserNotificationCenter.current()
         center.delegate = self
@@ -565,11 +715,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         return p
     }
 
+    private func moveBar(to origin: NSPoint) {
+        programmaticMove = true
+        barPanel.setFrameOrigin(origin)
+        DispatchQueue.main.async { [weak self] in self?.programmaticMove = false }
+    }
     private func relayout() {
-        guard let screen = NSScreen.main else { return }
+        guard let screen = barPanel.screen ?? NSScreen.main else { return }
         let vf = screen.visibleFrame
         let bs = barHost.fittingSize
-        if bs.width > 20 { barPanel.setContentSize(bs); barPanel.setFrameOrigin(NSPoint(x: vf.midX - bs.width/2, y: vf.maxY - bs.height - 6)) }
+        if bs.width > 20 {
+            barPanel.setContentSize(bs)
+            if userMovedBar {
+                // Keep the user's chosen spot; only clamp so the bar can't end up off-screen.
+                let f = barPanel.frame
+                let x = min(max(f.origin.x, vf.minX), vf.maxX - f.width)
+                let y = min(max(f.origin.y, vf.minY), vf.maxY - f.height)
+                moveBar(to: NSPoint(x: x, y: y))
+            } else {
+                moveBar(to: NSPoint(x: vf.midX - bs.width/2, y: vf.maxY - bs.height - 6))
+            }
+        }
         let us = usageHost.fittingSize
         if us.width > 20 { usagePanel.setContentSize(us) }
         positionUsage()
@@ -601,21 +767,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         if let s = sessions.first { focusSession(pid: s.pid) } else { toggleUsage() }
     }
     private func focusSession(pid: Int) {
-        var cur = pid
-        for _ in 0..<14 {
-            if let a = NSRunningApplication(processIdentifier: pid_t(cur)), a.activationPolicy == .regular {
-                a.activate(options: [.activateAllWindows]); hideUsage(); return
+        // Walk up the parent-pid chain off-main (each step shells out to `ps`); activate on main.
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var cur = pid
+            var target: NSRunningApplication?
+            for _ in 0..<14 {
+                if let a = NSRunningApplication(processIdentifier: pid_t(cur)), a.activationPolicy == .regular {
+                    target = a; break
+                }
+                guard let pp = Int(StatusModel.shell("/bin/ps", ["-o", "ppid=", "-p", "\(cur)"]).trimmingCharacters(in: .whitespaces)), pp > 1 else { break }
+                cur = pp
             }
-            guard let pp = Int(StatusModel.shell("/bin/ps", ["-o", "ppid=", "-p", "\(cur)"]).trimmingCharacters(in: .whitespaces)), pp > 1 else { break }
-            cur = pp
+            DispatchQueue.main.async {
+                target?.activate(options: [.activateAllWindows])
+                self?.hideUsage()
+            }
         }
-        hideUsage()
     }
 
     // Session done → notification + mascot
     private func sessionDone(tool: String, title: String, pid: Int) {
         let c = UNMutableNotificationContent()
-        c.title = tool == "claude" ? "🦀 Claude Code finished" : "🦊 Codex finished"
+        c.title = tool == "claude" ? "🦀 Claude Code finished" : "🦀 Codex finished"
         c.body = "\(title) — done"
         c.sound = .default
         c.userInfo = ["pid": pid]
@@ -623,7 +796,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         showMascot(tool: tool, title: title)
     }
     private func showMascot(tool: String, title: String) {
-        guard let screen = NSScreen.main else { return }
+        guard let screen = barPanel?.screen ?? NSScreen.main else { return }   // appear on the bar's display
         let panel = NSPanel(contentRect: screen.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         panel.level = .statusBar; panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
         panel.isFloatingPanel = true; panel.backgroundColor = .clear; panel.isOpaque = false

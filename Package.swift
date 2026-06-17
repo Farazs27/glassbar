@@ -7,7 +7,8 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "GlassBar",
-            path: "Sources/GlassBar"
+            path: "Sources/GlassBar",
+            linkerSettings: [.linkedFramework("IOKit")]
         )
     ],
     swiftLanguageModes: [.v5]

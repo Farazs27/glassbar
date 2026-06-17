@@ -1,6 +1,6 @@
 # GlassBar
 
-A tiny **Liquid Glass status HUD** that floats at the top‑center of your Mac and shows, in one glance, **what's running** across your AI / dev tools, **how much of your plan you've used**, and **what's playing** — without touching your Dock or menu bar. When a session finishes, a little **mascot crawls across your screen** and you get a notification.
+A tiny **Liquid Glass status HUD** that floats at the top of your Mac and shows, in one glance, **what's running** across your AI / dev tools, **how much of your plan you've used**, and **what's playing** — without touching your Dock or menu bar. **Drag it anywhere** and it remembers where you put it. When a session finishes, a little **mascot crawls across your screen** and you get a notification.
 
 ![GlassBar bar](docs/screenshot.png)
 
@@ -11,8 +11,11 @@ Left → right:
 - **App logos** — VS Code · Cursor · Claude desktop · ChatGPT. Full‑color when running, dimmed when not. **Click one to focus it** (or launch it if it's closed).
 - **Claude Code** — Claude logo + live **session count** + your real **5‑hour limit used** (e.g. `5h 28%`), colored green/orange/red. **Click to jump to the latest session.**
 - **Codex** — OpenAI logo + session count + **weekly limit used** (e.g. `wk 84%`). **Click to open the latest session.**
-- **♪** — system‑wide **now‑playing** track, the app making sound, or *Not playing*.
+- **♪** — system‑wide **now‑playing** track (the app making sound, or *Not playing*), with **⏮ previous · ▶/⏸ play‑pause · ⏭ next** controls.
+- **☕ Keep awake** — toggle on to **close the lid without sleeping**, so running sessions keep going. Orange when active. See below.
 - **⌄** — opens the **Running & Usage** popover.
+
+> Tip: the bar is **movable** — drag it by any empty area to reposition it; it stays put and is restored on next launch.
 
 ## The popover
 
@@ -79,9 +82,18 @@ rm -rf ~/Applications/GlassBar.app ~/.cache/glassbar
 ## Customize
 
 - Watched GUI apps: `GUI_APPS` near the top of `Sources/GlassBar/main.swift` (find a bundle id with `osascript -e 'id of app "Name"'`).
-- Mascots: `CLAUDE_MASCOT` / `CODEX_MASCOT` constants.
+- Mascot crabs: edit the `CRAB_BODY` / `CRAB_LEGS` pixel grid or the `CRAB_CLAUDE` / `CRAB_CODEX` color maps in `main.swift`.
 
 Rebuild with `./build.sh`.
+
+## Keep awake (lid can close)
+
+The **☕ coffee‑cup** toggle in the bar lets you **close your laptop screen without the Mac sleeping**, so running Claude Code / Codex sessions keep working.
+
+- **On AC power** it uses an in‑process power assertion (the same mechanism as `caffeinate -s`) — instant, no password.
+- **On battery** macOS forces sleep on lid close, so the toggle *also* runs `pmset disablesleep` — this asks for your **admin password once** and disables lid‑close sleep system‑wide.
+- **To restore normal sleep, toggle it off** (asks for your password again). Quitting GlassBar while it's on does **not** auto‑revert the battery setting — turn the toggle off, or run `sudo pmset -a disablesleep 0`. The state (and the lit icon) is remembered across launches.
+- ⚠️ Running real compute in a **closed laptop on battery** generates heat — don't leave it in a bag.
 
 ## Notes & limitations
 
